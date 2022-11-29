@@ -189,7 +189,7 @@ async fn worker_thread(configuration: MinerConfiguration, index: u32, multithrea
 
     println!("Connected to server (version={})", connection.version);
 
-    let time_work = Instant::now();
+    let mut time_work = Instant::now();
     let mut time_spent_mining = 0u128;
     let mut time_spent_in_connection = 0u128;
     let mut accepted_shares = 0;
@@ -250,6 +250,7 @@ async fn worker_thread(configuration: MinerConfiguration, index: u32, multithrea
                 100.0 * work_time_share,
                 100.0 * connection_time_share);
             
+            time_work = Instant::now();
             time_spent_mining = 0;
             time_spent_in_connection = 0;
         }
