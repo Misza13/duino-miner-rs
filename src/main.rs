@@ -26,6 +26,15 @@ fn because(reason: &str) -> impl Fn(String) -> String + '_ {
     move |original| format!("{}\n\tbecause:\n{}", reason, original)
 }
 
+fn format_hashrate(hashrate: f32) -> String {
+    match hashrate {
+        hr if hr >= 1e9 => format!("{:.2}GH/s", hr / 1e9),
+        hr if hr >= 1e6 => format!("{:.2}MH/s", hr / 1e6),
+        hr if hr >= 1e3 => format!("{:.2}kH/s", hr / 1e3),
+        hr => format!("{:.2}H/s", hr)
+    }
+}
+
 async fn read_string_from_socket(socket: &mut TcpStream) -> Result<String, String> {
     let mut buf = [0u8; 1024];
     let read = socket.read(&mut buf).await;
@@ -124,7 +133,7 @@ struct Job {
 #[derive(Clone, Copy)]
 struct Solution {
     nonce: u32,
-    elapsed: u128
+    elapsed_us: u128
 }
 
 enum JobFeedback {
@@ -161,9 +170,9 @@ fn solve(job: Job) -> Option<Solution> {
         let hash = sha_temp.finalize().to_vec();
 
         if hash == target {
-            let elapsed = time_hash.elapsed().as_millis();
+            let elapsed_us = time_hash.elapsed().as_micros();
 
-            return Some(Solution { nonce, elapsed });
+            return Some(Solution { nonce, elapsed_us });
         }
     }
 
@@ -182,21 +191,28 @@ async fn worker_thread(configuration: MinerConfiguration, index: u32, multithrea
 
     let time_work = Instant::now();
     let mut time_spent_mining = 0u128;
+    let mut time_spent_in_connection = 0u128;
     let mut accepted_shares = 0;
 
     loop {
+        let t = Instant::now();
+
         let job = connection.request_job(
                 &configuration.username,
                 &configuration.mining_key,
                 &configuration.difficulty).await
             .map_err(because("Could not request job"))?;
+        
+        time_spent_in_connection += t.elapsed().as_micros();
 
         let worker_id = format!("worker{}", index).clone();
         let worker_id = worker_id.as_str();
 
         match solve(job) {
-            Some(Solution{ nonce, elapsed }) => {
-                let hashrate = 1000.0 * nonce as f32 / elapsed as f32;
+            Some(Solution{ nonce, elapsed_us }) => {
+                let hashrate = 1e6 * nonce as f32 / elapsed_us as f32;
+
+                let t = Instant::now();
 
                 let feedback =
                     connection.report_job(
@@ -206,12 +222,14 @@ async fn worker_thread(configuration: MinerConfiguration, index: u32, multithrea
                         &configuration.rig_identifier,
                         multithread_id).await
                     .map_err(because("Could not report job"))?;
+                
+                time_spent_in_connection += t.elapsed().as_micros();
 
                 match feedback {
                     JobFeedback::Good => {
-                        time_spent_mining += elapsed;
+                        time_spent_mining += elapsed_us;
                         accepted_shares += 1;
-                        println!("[{}] Share accepted ({}ms, {}H/s)",worker_id, elapsed, hashrate);
+                        println!("[{}] Share accepted ({}ms, {})",worker_id, elapsed_us / 1000, format_hashrate(hashrate));
                     },
                     JobFeedback::Bad(reason) => {
                         println!("[{}] Share rejected because: {}", worker_id, reason);
@@ -224,10 +242,16 @@ async fn worker_thread(configuration: MinerConfiguration, index: u32, multithrea
         }
 
         if accepted_shares % 10 == 0 {
+            let work_time_share = time_spent_mining as f32 / time_work.elapsed().as_micros() as f32;
+            let connection_time_share = time_spent_in_connection as f32 / time_work.elapsed().as_micros() as f32;
             println!(
-                "[{}] Hash uptime: {:.1}%",
+                "[{}] Hash uptime: {:.2}% | Connection downtime: {:.2}%",
                 worker_id,
-                100.0 * time_spent_mining as f32 / time_work.elapsed().as_millis() as f32);
+                100.0 * work_time_share,
+                100.0 * connection_time_share);
+            
+            time_spent_mining = 0;
+            time_spent_in_connection = 0;
         }
     }
 }
