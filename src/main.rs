@@ -10,7 +10,8 @@ struct MinerConfiguration {
     username: String,
     mining_key: String,
     difficulty: String,
-    rig_identifier: String
+    rig_identifier: String,
+    thread_count: u32
 }
 
 fn source_error<T, E: Debug>(reason: &str, err: E) -> Result<T, String> {
@@ -240,7 +241,7 @@ async fn root() -> Result<(), String> {
     
     let multithread_id: u32 = rand::thread_rng().gen_range(10_000..100_000);
 
-    let handles: Vec<JoinHandle<()>> = (0..4).map(|i| {
+    let handles: Vec<JoinHandle<()>> = (0..configuration.thread_count).map(|i| {
         let configuration = configuration.clone();
         let multithread_id = format!("{}", multithread_id);
 

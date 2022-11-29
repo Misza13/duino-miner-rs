@@ -2,3 +2,4 @@ username: IAmUser
 mining_key: DucoToTheMoon
 difficulty: NET
 rig_identifier: My awesome rig
+thread_count: 2
