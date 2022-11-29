@@ -179,15 +179,15 @@ fn solve(job: Job) -> Option<Solution> {
     None
 }
 
-async fn worker_thread(configuration: MinerConfiguration, index: u32, multithread_id: &str) -> Result<(), String> {
+async fn worker(configuration: MinerConfiguration, index: u32, multithread_id: &str) -> Result<(), String> {
     let addr = get_server_address().await?;
 
-    println!("Server address is {}", addr);
+    println!("[worker{}] Server address is {}", index, addr);
 
     let mut connection = Connection::new(&addr).await
         .map_err(because("Could not create connection"))?;
 
-    println!("Connected to server (version={})", connection.version);
+    println!("[worker{}] Connected to server (version={})", index, connection.version);
 
     let mut time_work = Instant::now();
     let mut time_spent_mining = 0u128;
@@ -267,14 +267,18 @@ async fn root() -> Result<(), String> {
     let multithread_id: u32 = rand::thread_rng().gen_range(10_000..100_000);
 
     let handles: Vec<JoinHandle<()>> = (0..configuration.thread_count).map(|i| {
-        let configuration = configuration.clone();
         let multithread_id = format!("{}", multithread_id);
+        let configuration = configuration.clone();
 
         tokio::spawn(async move {
-            let result = worker_thread(configuration, i, &multithread_id).await;
-            match result {
-                Ok(_) => {},
-                Err(err) => println!("[worker{}] Error in worker:\n{}", i, err)
+            loop {
+                let configuration = configuration.clone();
+                let result = worker(configuration, i, &multithread_id).await;
+
+                match result {
+                    Ok(_) => return (),
+                    Err(err) => println!("[worker{}] Error in worker:\n{}", i, err)
+                }
             }
         })
     }).collect();
