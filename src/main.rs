@@ -1,4 +1,4 @@
-use std::{str, fmt::Debug};
+use anyhow::{Result, Error, Context};
 use hex::FromHex;
 use rand::Rng;
 use serde::Deserialize;
@@ -14,18 +14,6 @@ struct MinerConfiguration {
     thread_count: u32
 }
 
-fn source_error<T, E: Debug>(reason: &str, err: E) -> Result<T, String> {
-    Err(format!("{}\n\tbecause:\n{:?}", reason, err))
-}
-
-fn because_source_error<E: Debug>(reason: &str) -> impl Fn(E) -> String + '_ {
-    move |err| format!("{}\n\tbecause:\n{:?}", reason, err)
-}
-
-fn because(reason: &str) -> impl Fn(String) -> String + '_ {
-    move |original| format!("{}\n\tbecause:\n{}", reason, original)
-}
-
 fn format_hashrate(hashrate: f32) -> String {
     match hashrate {
         hr if hr >= 1e9 => format!("{:.2}GH/s", hr / 1e9),
@@ -35,32 +23,23 @@ fn format_hashrate(hashrate: f32) -> String {
     }
 }
 
-async fn read_string_from_socket(socket: &mut TcpStream) -> Result<String, String> {
+async fn read_string_from_socket(socket: &mut TcpStream) -> Result<String, Error> {
     let mut buf = [0u8; 1024];
-    let read = socket.read(&mut buf).await;
-    match read {
-        Ok(len) => {
-            match String::from_utf8(buf[0..len].to_vec()) {
-                Ok(value) => {
-                    match value.strip_suffix('\n') {
-                        Some(value) => Ok(value.to_string()),
-                        None => Ok(value.to_string())
-                    }
-                    // println!("<<< {}", value);
-                },
-                Err(err) => source_error("Could not decode string from socket", err)
-            }
-        },
-        Err(err) => source_error("Could not read from socket", err)
+    let len = socket.read(&mut buf).await
+        .context("Read from socket")?;
+    let value = String::from_utf8(buf[0..len].to_vec())
+        .context("Decode string from socket")?;
+    match value.strip_suffix('\n') {
+        Some(value) => Ok(value.to_string()),
+        None => Ok(value.to_string())
     }
 }
 
-async fn write_string_to_socket(socket: &mut TcpStream, value: String) -> Result<(), String> {
+async fn write_string_to_socket(socket: &mut TcpStream, value: String) -> Result<(), Error> {
     // println!(">>> {}", value);
-    match socket.write(value.as_bytes()).await {
-        Ok(_) => Ok(()),
-        Err(_) => Err("Could not write to socket".to_string())
-    }
+    socket.write(value.as_bytes()).await
+        .context("Write to socket")?;
+    Ok(())
 }
 
 struct Connection {
@@ -69,29 +48,29 @@ struct Connection {
 }
 
 impl Connection {
-    pub async fn new(addr: &str) -> Result<Connection, String> {
+    pub async fn new(addr: &str) -> Result<Connection, Error> {
         let mut socket = TcpStream::connect(addr).await
-            .map_err(because_source_error("Could not connect"))?;
+            .context("Connect")?;
         
         let version = read_string_from_socket(&mut socket).await
-            .map_err(because("Could not receive version"))?;
+            .context("Receive version")?;
         
         Ok(Connection { version: version.into(), socket })
     }
 
-    pub async fn request_job(&mut self, username: &str, mining_key: &str, difficulty: &str) -> Result<Job, String> {
+    pub async fn request_job(&mut self, username: &str, mining_key: &str, difficulty: &str) -> Result<Job, Error> {
         write_string_to_socket(&mut self.socket, format!("JOB,{},{},{}", username, difficulty, mining_key)).await
-            .map_err(because("Could not send job request"))?;
+            .context("Send job request")?;
 
         let job = read_string_from_socket(&mut self.socket).await
-            .map_err(because("Could not receive job"))?;
+            .context("Receive job")?;
         
         let data: Vec<&str> = job.split(',').collect();
         let base_hash = data[0].to_string();
         let target_hash = data[1].to_string();
 
         let difficulty = data[2].parse::<u32>()
-            .map_err(because_source_error("Could not parse difficulty"))?;
+            .context("Parse difficulty")?;
 
         Ok(Job{
             base_hash,
@@ -100,12 +79,12 @@ impl Connection {
         })
     }
 
-    pub async fn report_job(&mut self, nonce: u32, hashrate: u32, software_name: &str, rig_name: &str, multithread_id: &str) -> Result<JobFeedback, String> {
+    pub async fn report_job(&mut self, nonce: u32, hashrate: u32, software_name: &str, rig_name: &str, multithread_id: &str) -> Result<JobFeedback, Error> {
         write_string_to_socket(&mut self.socket, format!("{},{},{},{},,{}", nonce, hashrate, software_name, rig_name, multithread_id)).await
-            .map_err(because("Could not send job report"))?;
+            .context("Send job report")?;
 
         let feedback = read_string_from_socket(&mut self.socket).await
-            .map_err(because("Could not receive feedback"))?;
+            .context("Receive feedback")?;
 
         if feedback == "GOOD" || feedback == "BLOCK" {
             return Ok(JobFeedback::Good);
@@ -115,7 +94,7 @@ impl Connection {
             return Ok(JobFeedback::Bad(feedback[4..].to_string()));
         }
         
-        Err(format!("Could not parse feedback: {}", feedback))
+        Err(Error::msg(format!("Could not parse feedback: {}", feedback)))
     }
 
     // pub async fn close(&mut self) -> Result<(), std::io::Error> {
@@ -123,7 +102,6 @@ impl Connection {
     // }
 }
 
-// #[derive(Clone)]
 struct Job {
     base_hash: String,
     target_hash: String,
@@ -147,11 +125,11 @@ struct PoolInfo {
     port: u16
 }
 
-async fn get_server_address() -> Result<String, String> {
+async fn get_server_address() -> Result<String, Error> {
     let pool_info = reqwest::get("https://server.duinocoin.com/getPool").await
-        .map_err(because_source_error("Could not get receive pool info"))?
+        .context("Receive pool info")?
         .json::<PoolInfo>().await
-        .map_err(because_source_error("Could not deserialize pool info"))?;
+        .context("Deserialize pool info")?;
     
     Ok(format!("{}:{}", pool_info.ip, pool_info.port))
 }
@@ -179,13 +157,13 @@ fn solve(job: Job) -> Option<Solution> {
     None
 }
 
-async fn worker(configuration: MinerConfiguration, index: u32, multithread_id: &str) -> Result<(), String> {
+async fn worker(configuration: MinerConfiguration, index: u32, multithread_id: &str) -> Result<(), Error> {
     let addr = get_server_address().await?;
 
     println!("[worker{}] Server address is {}", index, addr);
 
     let mut connection = Connection::new(&addr).await
-        .map_err(because("Could not create connection"))?;
+        .context("Create connection")?;
 
     println!("[worker{}] Connected to server (version={})", index, connection.version);
 
@@ -201,7 +179,7 @@ async fn worker(configuration: MinerConfiguration, index: u32, multithread_id: &
                 &configuration.username,
                 &configuration.mining_key,
                 &configuration.difficulty).await
-            .map_err(because("Could not request job"))?;
+            .context("Request job")?;
         
         time_spent_in_connection += t.elapsed().as_micros();
 
@@ -221,7 +199,7 @@ async fn worker(configuration: MinerConfiguration, index: u32, multithread_id: &
                         format!("Rust Duino Miner {}", clap::crate_version!()).as_str(),
                         &configuration.rig_identifier,
                         multithread_id).await
-                    .map_err(because("Could not report job"))?;
+                    .context("Report job")?;
                 
                 time_spent_in_connection += t.elapsed().as_micros();
 
@@ -257,12 +235,12 @@ async fn worker(configuration: MinerConfiguration, index: u32, multithread_id: &
     }
 }
 
-async fn root() -> Result<(), String> {
+async fn root() -> Result<(), Error> {
     let config_file = std::fs::File::open("duino-miner.yml")
-        .map_err(because_source_error("Could not open configuration file"))?;
+        .context("Open configuration file")?;
     
     let configuration: MinerConfiguration = serde_yaml::from_reader(config_file)
-        .map_err(because_source_error("Could not deserialize configuration"))?;
+        .context("Deserialize configuration")?;
     
     let multithread_id: u32 = rand::thread_rng().gen_range(10_000..100_000);
 
